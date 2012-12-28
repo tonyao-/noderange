@@ -1,0 +1,337 @@
+#!/bin/bash
+
+# File: nr.functions
+# Author: griznog (griznog@gmail.com)
+# License: GPLv2 (http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt) 
+# Description:
+#   Collection of functions and routines to make it easier to 
+#   deal with node ranges and lists in bash scripts. Assumes a
+#   node name is of the form
+#         alpahbetcprefixOPTIONALSEPARATORnumericsuffix 
+#   where OPTIONALSEPARATOR represents an optional - or _ character 
+#         alphabeticprefix is case sensitive
+#         numericsuffix is a number 0 padded to some width
+#   For example:
+#     valid names: node00 mynode-00 abcde0000 abcde9999
+#     invalid names: c1d2-044 node0a node-bb
+#
+#   A range is a pdsh style range of the form
+#         alphabeticprefixOPTIONALSEPARATOR[numericstart-numericend] 
+#   with multiple nodes or ranges seperated by ,
+#   For example:
+#      valid ranges: 
+#           node[00-06],node08,node[10-23]
+#           node-[0000-9999]
+#      invalid ranges:
+#           node[0-999]
+
+
+##################################################################################
+# Test and compare functions 
+
+function nr_is_node_in_range () {
+  target=$1
+  range=$2
+  for node in $(nr_expand_range $range); do
+    if [[ $target == $node ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+function nr_is_next_node () {
+  # Is $2 == $1 + 1 ?
+  local node nextnode nodeplusone
+  node=$1
+  nextnode=$2
+  
+  nodeplusone=$( printf "$(nr_node_prefix $node)%0$(nr_node_suffix_width $node)d" $(( $(( 10#$(nr_node_suffix $node) )) + 1 )) )
+  nr_compare_nodes $nodeplusone $nextnode
+  return $?
+}
+
+function nr_compare_nodes () {
+  # Compare nodes following criteria:
+  #  - names are case sensitive
+  #  - most significant portion is prefix
+  #  - next most signifciant portion is width of node number
+  #  - next most significant portion is value of node number
+  #
+  # Return values:
+  # $1 == $2 : 0
+  # $1 <  $2 : 1
+  # $1 >  $2 : 2
+  # $1 bad syntax : 128
+  # $2 bad syntax : 129
+  #
+
+  local first fprefix fsuffix fwidth 
+  local second sprefix ssuffix swidth
+  first=$1
+  second=$2
+  if [[ $first =~ ([a-zA-Z_]+[-_]*)([0-9]+) ]]; then
+    fprefix=${BASH_REMATCH[1]}
+    fsuffix=${BASH_REMATCH[2]}
+    fwidth=${#BASH_REMATCH[2]}
+  else 
+    return 128
+  fi
+
+  if [[ $second =~ ([a-zA-Z_]+[-_]*)([0-9]+) ]]; then
+    sprefix=${BASH_REMATCH[1]}
+    ssuffix=${BASH_REMATCH[2]}
+    swidth=${#BASH_REMATCH[2]}
+  else
+    return 129
+  fi
+  
+  # Compare
+  if [[ "$fprefix" < "$sprefix" ]]; then
+    return 1
+  elif [[ "$fprefix" > "$sprefix" ]]; then 
+    return 2
+  else # prefixes equal, fall through to suffix width.
+    if [[ "$fwidth" <  "$swidth" ]]; then 
+      return 1
+    elif [[ "$fwidth" > "$swidth" ]]; then
+      return 2
+    else # widths equal, fall through to suffix values.
+      if [[ "$fsuffix" < "$ssuffix" ]]; then
+        return 1
+      elif [[ "$fsuffix" > "$ssuffix" ]]; then 
+        return 2
+      else # They must be equal.
+        return 0
+      fi
+    fi
+  fi
+}
+
+#############################################################################
+# Range manipulation
+#
+
+function nr_expand_range () {
+  # Accept a list of nodes and/or ranges and expand to a  
+  # list of nodes. List may be unsorted and contain duplicates
+
+  local IFS nodelist rangelist group prefix rstart rend width i j 
+  rangelist=$*
+
+  declare -a nodelist
+  IFS=', '
+  for group in $rangelist; do
+    if [[ $group =~ ([a-zA-Z_]+[-_]*)([0-9]+) ]]; then
+      # Single node
+      nodelist[${#nodelist[*]}]=${BASH_REMATCH[0]}
+    elif [[ $group =~ ([a-zA-Z_]+[-_]*)\[([0-9]+)\-([0-9]+)\] ]]; then
+      # Node Range
+      prefix=${BASH_REMATCH[1]}
+      rstart=$(( 10#${BASH_REMATCH[2]} ))
+      rend=$(( 10#${BASH_REMATCH[3]} ))
+      width=${#BASH_REMATCH[2]}
+   
+      if [[ ${#BASH_REMATCH[2]} -ne ${#BASH_REMATCH[3]} ]]; then
+        die "Node Range has mismatched widths of start ($rstart) and end ($rend)."
+      elif [[ $rstart -gt $rend ]]; then
+        j=$rstart
+        rstart=$rend
+        rend=$j
+      fi
+
+      i=$rstart
+      while [[ $i -le $rend ]];  do
+        nodelist[${#nodelist[*]}]=$(printf "%s%0${width}d" $prefix $i)
+        let i=i+1
+      done 
+    else
+      # Unrecognized, report error.
+      die "Not in pdsh syntax: $group"
+    fi
+  done
+  echo ${nodelist[@]}
+}
+
+function nr_expand_range_unique () {
+  # Accept a range or list of ranges and expand to a unique list of nodes.
+  local nodelist
+  declare -a nodelist
+  nodelist=( $(nr_expand_range $@) ) 
+  nodelist=( $(nr_unique_nodes ${nodelist[@]} ) )
+  echo ${nodelist[@]}
+}
+
+
+function nr_unique_nodes () {
+  # Remove duplicates from a list of nodes
+  local nodelist uniquelist i
+  declare -a nodelist
+  declare -a uniquelist
+  nodelist=( $(nr_sort_nodes $@) ) 
+  uniquelist[0]=${nodelist[0]}
+  i=0
+  for node in ${nodelist[@]}; do
+    if nr_compare_nodes $node ${uniquelist[$i]}; then
+      continue;
+    else
+      let i=i+1
+      uniquelist[i]=$node
+    fi
+  done
+  
+  echo ${uniquelist[@]}
+}
+
+function nr_condense_node_list () {
+  # Accept a list of nodes and condense into the smallest possible 
+  # range notation 
+  local IFS nodelist rangelist
+  local i start current next
+  declare -a rangelist
+  declare -a nodelist
+  nodelist=( $( nr_unique_nodes $( nr_expand_range $@ ) ) )
+  i=0
+  j=0
+  while (( i<${#nodelist[@]} )); do # Walk down nodelist
+    rstartnode=${nodelist[i]}
+    rstart=$(nr_node_suffix ${nodelist[i]})
+    rwidth=$(nr_node_suffix_width ${nodelist[i]})
+    rprefix=$(nr_node_prefix ${nodelist[i]})
+    while (( i<${#nodelist[@]}+1 )) && nr_is_next_node ${nodelist[i]} ${nodelist[i+1]}; do
+      let i=i+1
+    done
+    rend=$(nr_node_suffix ${nodelist[i]})
+    if [[ $rstart == $rend ]]; then # Single node
+      rangelist[j]=$(printf "${rprefix}%0${rwidth}d" $(( 10#$rstart )) )
+    else # Range
+      rangelist[j]=$(printf "${rprefix}[%0${rwidth}d-%0${rwidth}d]" $(( 10#$rstart )) $(( 10#$rend )) )
+    fi
+    let j=j+1
+    let i=i+1
+  done
+  temp=${rangelist[@]}
+  echo ${temp// /,}
+}
+
+function nr_sort_nodes () {
+  local min imin i j k nodelist
+  declare -a nodelist
+  nodelist=( $@ )
+  for (( i=0; i<${#nodelist[@]}; i++ )); do
+    imin=$i
+    min=${nodelist[$imin]}
+    for (( j=i+1; j<${#nodelist[@]}; j++ )); do
+      nr_compare_nodes ${nodelist[$j]} $min
+      (( $? == 1 )) || continue
+      imin=$j
+      min=${nodelist[$j]}
+    done 
+    for (( j=imin; j>i; j-- )); do
+      nodelist[j]=${nodelist[j-1]}
+    done
+    nodelist[i]=$min
+  done     
+  echo ${nodelist[@]}
+}
+
+
+############################################################################
+# Node dissecting functions
+
+function nr_node_prefix () {
+  # Return the prefix portion of a node
+  if [[ $1 =~ ([a-zA-Z_]+[-_]*)([0-9]+) ]]; then
+    echo ${BASH_REMATCH[1]}
+  else
+    return -1
+  fi
+}
+
+function nr_node_suffix () {
+  # Return the suffix portion of a node
+  if [[ $1 =~ ([a-zA-Z_]+[-_]*)([0-9]+) ]]; then
+    echo ${BASH_REMATCH[2]}
+  else 
+    return -1
+  fi
+}
+
+function nr_node_suffix_width () {
+  # Return the width of the suffix portion of a node
+  if [[ $1 =~ ([a-zA-Z_]+[-_]*)([0-9]+) ]]; then
+    echo ${#BASH_REMATCH[2]}
+  else 
+    return -1
+  fi
+}
+
+##############################################################################
+# Anything in this section will be ran if the file is directly executed, but
+# ignored if it is being sourced. Put tests here.
+#
+if [[ ${BASH_SOURCE[0]##*/} == ${0##*/} ]]; then
+  #set -x
+  #trap "echo 'Enter to continue: ';read" DEBUG
+   
+  echo
+  echo -n "nr_is_node_in_range node-00 node-[00-63]:  "
+  nr_is_node_in_range node-00 node-[00-63] && echo "PASSED"
+
+  echo
+  echo -n "nr_is_node_in_range node-02 node-[00-01],node-[03-03],node-04,othernodes0000:  " 
+  nr_is_node_in_range node-02 node-[00-01],node-[03-03],node-04,othernodes0000 || echo "PASSED"
+
+  echo
+  echo "nr_expand_range node00,node0000,node[000-088]: $(nr_expand_range node00,node0000,node[000-088])"
+
+  echo
+  echo "nr_expand_range node00,node0000,node[000-088]: $(nr_expand_range node00,node00,node00,node[00-03],node0000)"
+
+  echo
+  echo "nr_expand_range_unique node00,node0000,node[000-088]: $(nr_expand_range_unique node00,node00,node00,node[00-03],node0000)"
+
+  echo
+  echo -n "nr_compare_nodes node-00 node-01 :"
+  nr_compare_nodes node-00 node-01
+  echo $?
+
+  echo
+  echo -n "nr_compare_nodes node-02 node-01 :"
+  nr_compare_nodes node-02 node-01
+  echo $?
+
+  echo
+  echo -n "nr_compare_nodes node-00 node-00 :"
+  nr_compare_nodes node-00 node-00
+  echo $?
+
+  echo
+  echo -n "nr_compare_nodes node-000 node-01 :"
+  nr_compare_nodes node000 node01
+  echo $?
+
+  echo
+  echo -n "nr_compare_nodes mynode-00 anode-01 :"
+  nr_compare_nodes mynode-00 anode-01
+  echo $?
+
+  echo
+  echo -n "nr_compare_nodes anode000 bnode01 :"
+  nr_compare_nodes anode000 bnode01
+  echo $?
+
+  echo
+  echo "nr_sort_nodes node02 node01 node09 node12 node03 node07 node06 :"
+  echo "  $(nr_sort_nodes node02 node01 node09 node12 node03 node07 node06)"
+
+  echo
+  echo "nr_condense_node_list node00 node02 node01 node09 node12 node03 node07 node06 :"
+  echo "  $(nr_condense_node_list node00 node02 node01 node09 node12 node03 node07 node06)"
+
+  echo
+  echo "nr_condense_node_list node00 node00 node00 node02 node01 node09 node12 node03 node07 node06 :"
+  echo "  $(nr_condense_node_list node00 node00 node00 node02 node01 node09 node12 node03 node07 node06)"
+
+fi
+
