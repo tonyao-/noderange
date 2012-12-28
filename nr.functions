@@ -266,11 +266,11 @@ function nr_node_suffix_width () {
   fi
 }
 
-##############################################################################
-# Anything in this section will be ran if the file is directly executed, but
-# ignored if it is being sourced. Put tests here.
-#
-if [[ ${BASH_SOURCE[0]##*/} == ${0##*/} ]]; then
+###################################################################################
+# Main
+
+if [[ ${BASH_SOURCE[0]##*/} == ${0##*/} && ${0##*/} == "nr.functions" ]]; then
+  # FIle is being executed as nr.functions, run built in tests.
   #set -x
   #trap "echo 'Enter to continue: ';read" DEBUG
    
@@ -332,6 +332,14 @@ if [[ ${BASH_SOURCE[0]##*/} == ${0##*/} ]]; then
   echo
   echo "nr_condense_node_list node00 node00 node00 node02 node01 node09 node12 node03 node07 node06 :"
   echo "  $(nr_condense_node_list node00 node00 node00 node02 node01 node09 node12 node03 node07 node06)"
+
+elif [[ ${0##*/} == n2r ]]; then
+  # File is being executed as n2r, take all args and attempt to convert to a range.
+  echo $(nr_condense_node_list $@)
+
+elif [[ ${0##*/} == r2n ]]; then
+  # File is being executed as r2n, take all args and attempt to convert to a list of nodes.
+  echo $(nr_expand_range_unique $@)
 
 fi
 
