@@ -1,0 +1,1 @@
+This is a set of functions and tools written in pure bash for manipulating lists of node names and ranges. The goal is to be able to manipulate lists and ranges of node names with no need for any external dependencies beyond the bash shell.
